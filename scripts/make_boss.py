@@ -9,9 +9,10 @@ Implements instructions_prompt.md:
                    that the head rests on the boss alone
   * nothing else on the head changes; the output is a closed, manifold solid
 
-Method: delete only the socket's wall and floor triangles, close the opening with a flush cap
-fanned from the boss axis, then boolean-union a cylinder (manifold3d) whose base is buried
-inside the head, so only the projecting part shows. The result is reloaded from disk and checked.
+Method: delete only the socket's wall and floor triangles, close the opening with a cap that
+continues the head's curvature (a thin-plate spline through the rim and the surrounding surface),
+then boolean-union a cylinder (manifold3d) whose base is buried inside the head, so only the
+projecting part shows. The result is reloaded from disk and checked.
 
 Usage: python scripts/make_boss.py [--input headGK.stl] [--output headGK_boss.stl]
                                    [--diameter-pct 25] [--height-pct 12] [--report report.json]
@@ -27,6 +28,8 @@ import manifold3d as m3d
 import numpy as np
 import scipy.sparse as sp
 import trimesh
+from scipy.interpolate import RBFInterpolator
+from scipy.spatial import cKDTree
 
 # A point near the socket floor and the rough direction out of the socket; only used to find it.
 SOCKET_FLOOR_HINT = np.array([-0.14, 0.93, -25.53])
@@ -35,6 +38,9 @@ FLAT_DEG = 2.0  # max dihedral (deg) between neighbouring triangles of one plana
 BURY = 2.0  # the boss starts this far inside the datum plane, hidden in the head
 SEGMENTS = 128  # facets around the boss (chord error ~0.0014 at this size)
 EDIT_MARGIN = 0.5  # original triangles this close to the boss volume may be re-cut by it
+CAP_STEP = 0.25  # spacing (mm) between the cap's rings, about the rim's own vertex spacing
+CAP_FIT_BAND = 3.0  # surrounding surface within this distance (mm) of the rim shapes the cap
+CAP_INNER = 0.3  # innermost ring, as a fraction of the rim; well inside the boss, so never seen
 
 
 # ---------------------------------------------------------------------------- helpers
@@ -167,6 +173,56 @@ def find_socket(mesh: trimesh.Trimesh) -> dict:
                 open_corners=mesh.vertices[open_corners])
 
 
+def smooth_cap(head: trimesh.Trimesh, socket_faces: np.ndarray, rim: list[int],
+               p0: np.ndarray, a: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    """Close the socket opening with a surface that carries on the head's curvature.
+
+    Around the socket the head is a height field over the plane square to the axis (every face
+    there faces out along it), so the cap's heights come from a thin-plate spline through the rim
+    and the surrounding surface. The opening is star-shaped around the axis, so the cap is meshed
+    as scaled copies of the rim loop, fanned to the axis at the middle. Its outer loop is the rim
+    itself, so it joins the head exactly.
+
+    Returns the new vertices, the cap's faces (rim ids as-is, new vertices numbered from
+    len(head.vertices)), and how far the cap rises above a flat fan from p0 at most.
+    """
+    V = head.vertices
+    u, v = frame(a)
+
+    def local(P):
+        d = P - p0
+        return np.column_stack([d @ u, d @ v]), d @ a
+
+    rim = np.asarray(rim)
+    rim_uv, rim_s = local(V[rim])
+    others = np.setdiff1d(np.arange(len(V)), np.unique(head.faces[socket_faces]))
+    uv, s = local(V[others])
+    band = (cKDTree(rim_uv).query(uv)[0] < CAP_FIT_BAND) & (np.abs(s) < 4)
+    surface = RBFInterpolator(np.vstack([rim_uv, uv[band]]), np.concatenate([rim_s, s[band]]),
+                              kernel="thin_plate_spline")
+
+    n = len(rim)
+    reach = float(np.linalg.norm(rim_uv, axis=1).max())
+    scales = np.linspace(1, CAP_INNER, int(np.ceil(reach * (1 - CAP_INNER) / CAP_STEP)) + 1)[1:]
+    ring_uv = np.concatenate([rim_uv * k for k in scales] + [np.zeros((1, 2))])
+    ring_s = surface(ring_uv)
+    new_v = p0 + ring_uv[:, :1] * u + ring_uv[:, 1:] * v + ring_s[:, None] * a
+
+    base = len(V)
+    rings = [rim] + [base + i * n + np.arange(n) for i in range(len(scales))]
+    centre = base + len(scales) * n
+    j, j1 = np.arange(n), (np.arange(n) + 1) % n
+    faces = []
+    for outer, inner in zip(rings[:-1], rings[1:]):  # same winding as a fan (centre, next, this)
+        faces += [np.column_stack([inner[j], outer[j1], outer[j]]),
+                  np.column_stack([inner[j], inner[j1], outer[j1]])]
+    faces.append(np.column_stack([np.full(n, centre), rings[-1][j1], rings[-1][j]]))
+
+    # how much higher than the old flat fan from p0 the cap now sits, over the exposed corners
+    flat_s = np.concatenate([rim_s * k for k in scales] + [np.zeros(1)])
+    return new_v, np.vstack(faces), float((ring_s - flat_s).max())
+
+
 def sides(corners: np.ndarray) -> list[float]:
     """Side lengths of a quad given its 4 corners in any order (the 4 shortest of 6 distances)."""
     d = [float(np.linalg.norm(corners[i] - corners[j])) for i, j in itertools.combinations(range(4), 2)]
@@ -212,12 +268,12 @@ def build(head: trimesh.Trimesh, diameter_pct: float, height_pct: float) -> tupl
     if need >= height:
         raise RuntimeError(f"a {height:.3f} boss would not clear the head (needs > {need:.3f})")
 
-    # 1) Remove the socket and close the opening with a fan from the boss axis.
+    # 1) Remove the socket and close the opening with a cap that follows the head's curvature,
+    #    so the corners of the old square outside the round boss end up flush with the head.
     keep = np.ones(len(head.faces), bool)
     keep[sock["faces"]] = False
-    rim = sock["rim"]
-    cap = np.array([[len(V), rim[(i + 1) % len(rim)], rim[i]] for i in range(len(rim))])
-    verts = np.vstack([V, p0])
+    cap_v, cap, cap_rise = smooth_cap(head, sock["faces"], sock["rim"], p0, a)
+    verts = np.vstack([V, cap_v])
     faces = np.vstack([head.faces[keep], cap])
     cap_n = np.cross(verts[cap[:, 1]] - verts[cap[:, 0]], verts[cap[:, 2]] - verts[cap[:, 0]])
     if np.any(cap_n @ a <= 0):
@@ -293,6 +349,10 @@ def build(head: trimesh.Trimesh, diameter_pct: float, height_pct: float) -> tupl
             "height": round(height, 4),
             "min_height_to_clear": round(need, 4),
         },
+        "cap": {
+            "vertices": int(len(cap_v)),
+            "max_rise_over_flat_fan": round(cap_rise, 4),
+        },
         "original_triangles_restored": int(len(lost)),
     }
     geom = dict(a=a, p0=p0, r=r, height=height, protect=protect, socket=sock["faces"])
@@ -367,7 +427,7 @@ def main() -> int:
     info["spec"] = {"diameter_pct_of_width": args.diameter_pct,
                     "height_pct_of_head_height": args.height_pct}
 
-    print(json.dumps({k: info[k] for k in ("socket", "datum", "boss")}, indent=2))
+    print(json.dumps({k: info[k] for k in ("socket", "datum", "boss", "cap")}, indent=2))
     print(f"\nwrote {args.output}: {info['result']['triangles']} triangles, "
           f"volume {info['result']['volume_original']} -> {info['result']['volume']}")
     for name, ok in info["result"]["checks"].items():

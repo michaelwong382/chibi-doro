@@ -54,9 +54,13 @@ As the spec asks, the boss is sized as a percentage of the head, so it scales wi
 1. Finds the socket, which is a flat floor and four flat walls (132 triangles). The floor is a
    5.90 mm square and the opening is about 9 mm square. The socket is 7.9 mm deep along its axis,
    with 11° of draft on each wall.
-2. Deletes those triangles. It closes the opening with a cap that fans out from the boss axis to the
-   original rim. The corners of the old square that the round boss doesn't cover stay flush with the
-   surrounding surface.
+2. Deletes those triangles. It closes the opening with a cap that continues the head's curvature:
+   a thin-plate spline fitted through the opening's rim and the surface within 3 mm of it. The cap
+   joins the original rim exactly. This keeps the corners of the old square that the round boss
+   doesn't cover flush with the head. A flat cap would sit up to 0.42 mm below the curve and leave
+   triangular dents at those corners. Across the rim, neighbouring triangles meet at a median of
+   0.3° (at most 1.8°, ignoring a few near-zero-area slivers already in the original rim), the
+   same as on the untouched surface around it.
 3. Unions a 128-sided cylinder with the head using
    [manifold3d](https://github.com/elalish/manifold). The cylinder starts 2 mm inside the head, so
    its base is hidden. It ends 3.419 mm beyond the datum plane, with its end face square to the axis.
@@ -99,7 +103,7 @@ The spec leaves a few things open. Each of these can be changed in `scripts/make
 ## Notes on the original model
 
 - The original has 299,998 triangles and a bounding box of 36.54 × 30.12 × 31.95 mm (X × Y × Z).
-  It is one closed solid of 18,175 mm³. The boss version has 300,964 triangles and 18,845 mm³.
+  It is one closed solid of 18,175 mm³. The boss version has 301,906 triangles and 18,846 mm³.
 - There is a rectangular slot at the top front of the head. It is part of the original and is unchanged.
 - The mesh has one tiny through-hole (genus 1) at the rose ornament, around (14.8, 5.6, −8.3).
   It comes from the original, and the boss version keeps it.
